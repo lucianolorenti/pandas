@@ -112,6 +112,10 @@ class MPLPlot(ABC):
     _layout_type = "vertical"
     _default_rot = 0
 
+    def _is_ts_plot(self) -> bool:
+        # this is slightly deceptive
+        return not self.x_compat and self.use_index and self._use_dynamic_x()
+
     @property
     def orientation(self) -> str | None:
         return None
@@ -267,6 +271,11 @@ class MPLPlot(ABC):
         self.kwds = kwds
 
         self._validate_color_args()
+
+        from pandas.plotting import plot_params
+        self.x_compat = plot_params["x_compat"]
+        if "x_compat" in self.kwds:
+            self.x_compat = bool(self.kwds.pop("x_compat"))
 
     def _validate_subplots_kwarg(
         self, subplots: bool | Sequence[Sequence[str]]
@@ -1129,6 +1138,9 @@ class MPLPlot(ABC):
             x_set.add(points[0][0])
             y_set.add(points[0][1])
         return (len(y_set), len(x_set))
+    
+    def _use_dynamic_x(self):
+        return use_dynamic_x(self._get_ax(0), self.data)
 
 
 class PlanePlot(MPLPlot, ABC):
@@ -1335,21 +1347,9 @@ class LinePlot(MPLPlot):
         return "line"
 
     def __init__(self, data, **kwargs) -> None:
-        from pandas.plotting import plot_params
-
         MPLPlot.__init__(self, data, **kwargs)
         if self.stacked:
             self.data = self.data.fillna(value=0)
-        self.x_compat = plot_params["x_compat"]
-        if "x_compat" in self.kwds:
-            self.x_compat = bool(self.kwds.pop("x_compat"))
-
-    def _is_ts_plot(self) -> bool:
-        # this is slightly deceptive
-        return not self.x_compat and self.use_index and self._use_dynamic_x()
-
-    def _use_dynamic_x(self):
-        return use_dynamic_x(self._get_ax(0), self.data)
 
     def _make_plot(self) -> None:
         if self._is_ts_plot():
@@ -1373,11 +1373,12 @@ class LinePlot(MPLPlot):
         for i, (label, y) in enumerate(it):
             ax = self._get_ax(i)
             kwds = self.kwds.copy()
+            print(kwds)
             style, kwds = self._apply_style_colors(colors, kwds, i, label)
-
+            print(kwds)
             errors = self._get_errorbars(label=label, index=i)
             kwds = dict(kwds, **errors)
-
+            print(kwds)
             label = pprint_thing(label)  # .encode('utf-8')
             label = self._mark_right_label(label, index=i)
             kwds["label"] = label
@@ -1671,11 +1672,20 @@ class BarPlot(MPLPlot):
         colors = self._get_colors()
         ncolors = len(colors)
 
+
+    
         pos_prior = neg_prior = np.zeros(len(self.data))
         K = self.nseries
 
-        for i, (label, y) in enumerate(self._iter_data(fillna=0)):
+        keep_index = self._is_ts_plot()
+        if self._is_ts_plot():
+            self.data = maybe_convert_index(self._get_ax(0), self.data)
+        else:
+            data = self.data
+        for i, (label, y) in enumerate(self._iter_data(self.data, fillna=0, keep_index=keep_index )):
             ax = self._get_ax(i)
+
+
             kwds = self.kwds.copy()
             if self._is_series:
                 kwds["color"] = colors
@@ -1692,6 +1702,15 @@ class BarPlot(MPLPlot):
 
             if (("yerr" in kwds) or ("xerr" in kwds)) and (kwds.get("ecolor") is None):
                 kwds["ecolor"] = mpl.rcParams["xtick.color"]
+
+            if self._is_ts_plot():
+                freq, y = maybe_resample(y, ax, {})
+                decorate_axes(ax, freq, {})
+                # digging deeper
+                if hasattr(ax, "left_ax"):
+                    decorate_axes(ax.left_ax, freq, kwds)
+                if hasattr(ax, "right_ax"):
+                    decorate_axes(ax.right_ax, freq, kwds)
 
             start = 0
             if self.log and (y >= 1).all():
@@ -1741,6 +1760,7 @@ class BarPlot(MPLPlot):
                 )
             self._append_legend_handles_labels(rect, label)
 
+
     def _post_plot_logic(self, ax: Axes, data) -> None:
         if self.use_index:
             str_index = [pprint_thing(key) for key in data.index]
@@ -1751,6 +1771,8 @@ class BarPlot(MPLPlot):
         e_edge = self.ax_pos[-1] + 0.25 + self.bar_width + self.lim_offset
 
         self._decorate_ticks(ax, self._get_index_name(), str_index, s_edge, e_edge)
+        print(data.index)
+        format_dateaxis(ax, ax.freq, data.index)
 
     def _decorate_ticks(self, ax: Axes, name, ticklabels, start_edge, end_edge) -> None:
         ax.set_xlim((start_edge, end_edge))
